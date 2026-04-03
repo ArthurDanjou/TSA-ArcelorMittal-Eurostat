@@ -1,0 +1,683 @@
+---
+format:
+  typst:
+    papersize: a4
+    lang: fr
+    number-sections: true
+---
+
+```{=typst}
+#set page(margin: 2cm)
+
+#align(center)[
+  #v(1.5cm)
+  
+  #smallcaps(text(size: 14pt)[Université Paris-Dauphine -- PSL \ Centre de Recherche en Mathématiques de la Décision])
+  
+  #v(1.5cm)
+  #line(length: 100%)
+  #v(0.3cm)
+  
+  #strong(smallcaps(text(size: 18pt)[Séries Temporelles et Applications Actuarielles - Projet - M2ISF]))
+  
+  #v(0.3cm)
+  #line(length: 100%)
+  #v(1.5cm)
+  
+  #smallcaps(text(size: 16pt)[Arthur Danjou]) \
+  #v(1.8cm)
+  
+  #text(size: 12pt)[Course Supervisor:] \
+  #v(0.3cm)
+  #text(size: 12pt)[Tachine El Alami] \
+  #v(0.2cm)
+  #text(size: 12pt)[Cérémade, Université Paris-Dauphine]
+  
+  #v(2cm)
+  #image("logo dauphine.jpg", height: 20mm)
+  #v(0.5cm)
+  
+  #line(length: 100%)
+  #v(0.2cm)
+  #smallcaps[Séries Temporelles et Applications Actuarielles \ ACADEMIC YEAR 2025/2026]
+]
+
+#pagebreak()
+
+#outline(
+  title: "Table des matières",
+  depth: 3
+)
+
+#pagebreak()
+```
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  echo = FALSE,
+  results = 'hide'
+)
+```
+
+```{r, echo=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tseries)
+library(patchwork)
+library(forecast)
+library(fGarch)
+library(FinTS)
+library(lmtest)
+library(corrplot)
+library(vars)
+```
+
+# Introduction
+
+Ce projet applique les méthodes de séries temporelles à deux terrains complémentaires : la finance de marché et la macroéconomie. L’objectif est d’évaluer, dans un cadre rigoureux, la pertinence de différentes approches économétriques face à des données aux propriétés contrastées (fréquence, stationnarité, volatilité, et ruptures structurelles), afin de comparer leur capacité d’explication et de prévision.
+
+La première partie porte sur l’action ArcelorMittal (**CAC40**) sur la période $2000-2010$. Elle met l’accent sur la dynamique des rendements financiers et sur la modélisation de l’hétéroscédasticité conditionnelle. Après l’analyse des propriétés de stationnarité, l’étude mobilise des modèles de la famille GARCH pour capter le phénomène de *volatility clustering* caractéristique des marchés.
+
+La seconde partie est consacrée à l’analyse de séries macroéconomiques Eurostat, centrée sur le PIB et ses liens avec d’autres agrégats, notamment la production industrielle. La démarche progresse d’un cadre univarié de type $SARIMA$ vers des modèles multivariés ($VAR$). Une attention particulière est portée aux limites de la modélisation linéaire face aux chocs exogènes extrêmes (comme la rupture de $2020$) et à l'évaluation stricte des performances prédictives. Cette évaluation s'appuiera sur des tests de significativité statistique, dépassant la simple comparaison empirique des erreurs de prévision pour valider la robustesse des modèles hors-échantillon.
+
+# Première Partie : Analyse d'une valeur du CAC40
+
+## Importation des données journalières
+
+Nous commençons par importer les données journalières d’ArcelorMittal, couvrant la période $2000-2010$. Ces données sont au format CSV et contiennent les prix de clôture quotidiens.
+
+```{r}
+file_path <- "./data/DANJOU_CAC40_ARCELOR.MITTAL.csv"
+df_daily <- read.csv(file_path, stringsAsFactors = FALSE)
+
+summary(df_daily)
+```
+
+## Construction de la série mensuelle
+
+Pour obtenir une série mensuelle à partir des données journalières, nous agrégons les prix de clôture en prenant le premier jour de chaque mois.
+
+```{r}
+df_daily$Dates <- as.Date(df_daily$Dates, format = "%Y-%m-%d")
+
+df_monthly <- df_daily |>
+  mutate(YearMonth = format(Dates, "%Y-%m")) |>
+  group_by(YearMonth) |>
+  arrange(Dates) |>
+  slice(1) |>
+  ungroup() |>
+  dplyr::select(-YearMonth)
+```
+
+## Analyses descriptives préliminaires
+
+```{r}
+p1 <- ggplot(df_daily, aes(x = Dates, y = ARCELOR.MITTAL)) +
+  geom_line(color = "steelblue") +
+  theme_minimal() +
+  labs(title = "ArcelorMittal - Série Journalière", y = "Prix", x = "")
+
+p2 <- ggplot(df_monthly, aes(x = Dates, y = ARCELOR.MITTAL)) +
+  geom_line(color = "darkred") +
+  geom_point(color = "darkred", size = 1) +
+  theme_minimal() +
+  labs(title = "ArcelorMittal - Série Mensuelle", y = "Prix", x = "")
+
+p1 / p2
+
+summary(df_daily$ARCELOR.MITTAL)
+sd(df_daily$ARCELOR.MITTAL)
+
+summary(df_monthly$ARCELOR.MITTAL)
+sd(df_monthly$ARCELOR.MITTAL)
+```
+
+L'examen des séries journalière et mensuelle (2000-2010) met en évidence une forte volatilité, avec une dispersion élevée des prix (écart-type proche de 35 pour une moyenne autour de 45). La dynamique reflète les grands épisodes macroéconomiques de la période, notamment la hausse pré-2008 puis la chute liée à la crise financière. Ces éléments suggèrent une série en niveau non stationnaire, à confirmer par des tests formels.
+
+## Caractéristiques fondamentales (Stationnarité, Saisonnalité, Spectre)
+
+```{r}
+acf(df_monthly$ARCELOR.MITTAL, main = "ACF - Prix Mensuels")
+pacf(df_monthly$ARCELOR.MITTAL, main = "PACF - Prix Mensuels")
+
+adf.test(df_monthly$ARCELOR.MITTAL)
+
+kpss.test(df_monthly$ARCELOR.MITTAL)
+
+spectrum(
+  df_monthly$ARCELOR.MITTAL,
+  log = "no",
+  main = "Périodogramme - Prix Mensuels"
+)
+```
+
+```{r}
+df_monthly$LogReturn <- c(NA, diff(log(df_monthly$ARCELOR.MITTAL)))
+
+log_returns_clean <- na.omit(df_monthly$LogReturn)
+
+acf(log_returns_clean, main = "ACF - Rendements Logarithmiques")
+pacf(log_returns_clean, main = "PACF - Rendements Logarithmiques")
+
+adf.test(log_returns_clean)
+
+kpss.test(log_returns_clean)
+
+spectrum(log_returns_clean, log = "no", main = "Périodogramme - Rendements")
+```
+
+Les diagnostics confirment la non-stationnarité des prix mensuels : **ACF** décroissante lentement, **PACF** avec premier retard élevé, spectre dominé par les basses fréquences. Les tests vont dans le même sens : **ADF** ne rejette pas la racine unitaire (p-value $= 0.6242$) et **KPSS** rejette la stationnarité (p-value $< 0.01$). La série des prix est donc $I(1)$.
+
+On stationnarise alors via les rendements logarithmiques $r_t = \ln(P_t) - \ln(P_{t-1})$. Après transformation, l'autocorrélation devient faible, le spectre est plus plat, et les tests inversent le diagnostic (ADF rejette la racine unitaire, KPSS ne rejette plus la stationnarité). Les rendements sont ainsi $I(0)$ et exploitables pour la modélisation.
+
+## Modélisation de la série mensuelle
+
+### Modèle initial et diagnostic
+
+```{r}
+modele_simple <- Arima(log_returns_clean, order = c(1, 0, 0))
+
+summary(modele_simple)
+
+checkresiduals(modele_simple)
+
+Box.test(modele_simple$residuals, lag = 12, type = "Ljung-Box")
+
+tseries::jarque.bera.test(modele_simple$residuals)
+```
+
+Le premier modèle retenu est un $ARMA(1,0)$ sur les rendements mensuels. Le coefficient $AR$ estimé ($0.1922$ ; écart-type $0.0854$) est significatif au seuil de $5\%$, ce qui indique une faible mémoire de court terme. En revanche, la dérive ($0.0037$) n'est pas significative.
+
+Les diagnostics résiduels sont globalement satisfaisants : le test de Ljung-Box ne détecte pas d'autocorrélation résiduelle (p-values $0.6669$ et $0.254$) et Jarque-Bera ne rejette pas la normalité (p-value $0.1004$). Un signal isolé au retard 11 reste toutefois visible dans l'ACF des résidus. Le modèle constitue donc une base correcte (**AIC** $= -87.28$), mais une amélioration itérative reste pertinente.
+
+### Sélection itérative et modèle optimal
+
+```{r}
+modele_avance <- auto.arima(
+  log_returns_clean,
+  stationary = TRUE,
+  ic = "aic",
+  stepwise = FALSE,
+  approximation = FALSE
+)
+
+summary(modele_avance)
+
+checkresiduals(modele_avance)
+
+Box.test(modele_avance$residuals, lag = 12, type = "Ljung-Box")
+```
+
+```{r}
+modele_wn <- Arima(log_returns_clean, order = c(0, 0, 0), include.mean = FALSE)
+
+aic_avance <- AIC(modele_avance)
+aic_wn <- AIC(modele_wn)
+
+df_comparaison_wn <- data.frame(
+  Modele = c("Modèle Avancé", "Bruit Blanc"),
+  AIC = c(aic_avance, aic_wn)
+)
+```
+
+```{r, results='markup'}
+knitr::kable(
+  df_comparaison_wn,
+  digits = 2,
+  caption = "Comparaison des AIC entre le modèle avancé et le bruit blanc"
+)
+```
+
+Afin de dépasser les limites du modèle initial, nous avons procédé à une recherche systématique dans l'espace des modèles $ARMA$. L'optimisation sous contrainte de pénalité (recherche exhaustive minimisant l'**AIC** via la fonction `auto.arima`) nous permet d'évaluer de manière itérative de multiples spécifications. L'algorithme converge finalement vers un modèle $ARMA(1,0)$, prouvant qu'aucune complexification massive de la composante moyenne ne survit aux critères d'information.
+
+Afin d'évaluer rigoureusement la pertinence de la modélisation de la moyenne conditionnelle, le modèle avancé a été confronté à un processus de bruit blanc pur ($ARIMA(0,0,0)$), qui représente mathématiquement l'hypothèse stricte d'efficience des marchés.
+
+Les critères d'information révèlent une supériorité du modèle avancé (**AIC** $= -89.24$) sur le bruit blanc (**AIC** $= -86.26$). Cette différence d'environ $3$ points prouve que la structure ARMA capte une dépendance linéaire statistiquement significative : la série des rendements n'est donc pas une pure marche au hasard.
+
+Toutefois, d'un point de vue pratique, ce gain d'information reste marginal. La faible autocorrélation capturée (pouvant s'expliquer par des effets de microstructure ou une inertie transitoire) n'offre qu'un pouvoir prédictif directionnel extrêmement limité, comme le confirment les larges intervalles de confiance des projections. Le marché demeure ainsi globalement efficient, justifiant de déplacer l'effort de modélisation vers la variance conditionnelle (volatilité).
+
+### Projections et analyse de l'incertitude
+
+```{r}
+prev_simple <- forecast(modele_simple, h = 12)
+prev_avance <- forecast(modele_avance, h = 12)
+
+p_simple <- autoplot(prev_simple) +
+  theme_minimal() +
+  labs(
+    title = "Projections ARMA(1,0) avec dérive",
+    y = "Rendements",
+    x = "Temps"
+  )
+
+p_avance <- autoplot(prev_avance) +
+  theme_minimal() +
+  labs(
+    title = "Projections ARMA(1,0) centré",
+    y = "Rendements",
+    x = "Temps"
+  )
+
+p_simple / p_avance
+```
+
+Les prévisions à 12 mois des deux modèles convergent rapidement vers leur moyenne de long terme (environ $0.0037$ pour le modèle avec dérive, $0$ pour le modèle centré). Les intervalles de confiance (80% et 95%) sont larges, ce qui traduit une forte incertitude et une faible prévisibilité directionnelle au-delà du très court terme.
+
+Il convient de noter que ces projections portent sur les rendements logarithmiques. Une reconstruction des prix futurs nécessiterait de tenir compte de l'inégalité de Jensen, l'espérance de l'exponentielle différant de l'exponentielle de l'espérance en présence d'une variance non nulle.
+
+### Évaluation des performances prédictives (Out-of-Sample)
+
+```{r}
+h_mensuel <- 12
+n_mensuel <- length(log_returns_clean)
+
+train_returns <- log_returns_clean[1:(n_mensuel - h_mensuel)]
+test_returns <- log_returns_clean[(n_mensuel - h_mensuel + 1):n_mensuel]
+
+modele_simple_train <- Arima(train_returns, order = c(1, 0, 0))
+modele_avance_train <- Arima(
+  train_returns,
+  order = c(1, 0, 0),
+  include.mean = FALSE
+)
+
+prev_simple_out <- forecast(modele_simple_train, h = h_mensuel)$mean
+prev_avance_out <- forecast(modele_avance_train, h = h_mensuel)$mean
+
+rmse_simple_out <- sqrt(mean((test_returns - prev_simple_out)^2))
+mae_simple_out <- mean(abs(test_returns - prev_simple_out))
+
+rmse_avance_out <- sqrt(mean((test_returns - prev_avance_out)^2))
+mae_avance_out <- mean(abs(test_returns - prev_avance_out))
+
+comparaison_out_sample <- data.frame(
+  Modele = c("ARMA(1,0) avec dérive", "ARMA(1,0) centré"),
+  RMSE_Out = c(rmse_simple_out, rmse_avance_out),
+  MAE_Out = c(mae_simple_out, mae_avance_out)
+)
+```
+
+```{r, results='markup'}
+knitr::kable(
+  comparaison_out_sample,
+  digits = 5,
+  caption = "Comparaison des métriques d'erreur prédictive (Out-of-Sample à 12 mois)"
+)
+```
+
+L'évaluation des performances sur les données d'apprentissage introduit un biais de sur-optimisme mathématique. Pour jauger rigoureusement la véritable capacité prédictive des modèles, une évaluation hors échantillon (Out-of-Sample) a été réalisée en isolant les $12$ derniers mois de la série des rendements.
+
+Les métriques d'erreur révèlent que le modèle $ARMA(1,0)$ centré surperforme le modèle initial avec dérive, tant sur le critère du **RMSE** ($0.11228$ contre $0.11282$) que du **MAE** ($0.09546$ contre $0.09631$).
+
+Ce constat empirique est fondamental et valide l'approche par sélection stricte : la dérive estimée dans le premier modèle n'était pas statistiquement significative. Maintenir ce paramètre introduisait du bruit, dégradant marginalement la qualité de la prévision sur de nouvelles données. Le modèle le plus parcimonieux s'avère donc le plus robuste en prévision.
+
+D'un point de vue financier, projeter un rendement structurellement nul (modèle centré) est statistiquement plus efficace que de s'appuyer sur une moyenne historique illusoire. Cela confirme définitivement la forte efficience informationnelle du marché sur cette valeur, justifiant l'abandon de la modélisation de la moyenne au profit de la variance conditionnelle.
+
+## Analyse de la série journalière : Test d'homoscédasticité
+
+```{r}
+df_daily$LogReturn <- c(NA, diff(log(df_daily$ARCELOR.MITTAL)))
+log_returns_daily <- na.omit(df_daily$LogReturn)
+dates_daily <- df_daily$Dates[-1]
+
+df_plot <- data.frame(Date = dates_daily, Return = log_returns_daily)
+
+ggplot(df_plot, aes(x = Date, y = Return)) +
+  geom_line(color = "darkblue", linewidth = 0.3) +
+  theme_minimal() +
+  labs(
+    title = "Rendements logarithmiques journaliers",
+    y = "Rendements",
+    x = ""
+  )
+
+acf(log_returns_daily^2, main = "ACF des rendements au carré")
+
+ArchTest(log_returns_daily, lags = 12)
+```
+
+À fréquence journalière, l'hypothèse d'efficience permet d'assimiler directement la série des rendements aux innovations d'un processus de moyenne nulle ($r_t ​= \varepsilon_t$​). L'analyse de ces rendements montre un regroupement de volatilité (volatility clustering), incompatible avec l'hypothèse de variance constante. L'**ACF** des rendements au carré reste significative sur plusieurs retards, et le test $ARCH-LM$ confirme fortement la présence d'hétéroscédasticité conditionnelle (statistique $= 346.93$, p-value $< 2.2e-16$). Un modèle homoscédastique est donc inadapté et une modélisation $ARCH/GARCH$ est nécessaire.
+
+## Modélisation de la volatilité (ARCH/GARCH)
+
+Compte tenu des effets ARCH détectés, on retient un modèle $GARCH(1,1)$ avec innovations Student, choix standard pour des rendements financiers journaliers. Cette spécification capte à la fois la réaction immédiate aux chocs et la persistance de la volatilité, tout en tenant compte des queues épaisses.
+
+```{r}
+fit_garch <- garchFit(
+  ~ garch(1, 1),
+  data = log_returns_daily,
+  trace = FALSE,
+  cond.dist = "std"
+)
+
+summary(fit_garch)
+```
+
+L'estimation confirme la pertinence du modèle : les paramètres de variance sont significatifs, avec $\alpha_1 = 0.1309$ (effet ARCH) et $\beta_1 = 0.8488$ (effet GARCH). Leur somme ($\alpha_1 ​+ \beta_1 ​= 0.9797$) indique une forte persistance de la volatilité, mais respecte la condition de stationnarité stricte ($\alpha_1 ​+ \beta_1​ < 1$). Le modèle admet donc une variance inconditionnelle finie, garantissant la validité théorique du processus modélisé. Le paramètre de forme Student (shape $\approx 5.38$) confirme aussi des queues épaisses.
+
+Les diagnostics sur les résidus standardisés sont globalement satisfaisants pour la variance : Ljung-Box sur les carrés (p-values entre $0.099$ et $0.139$) et $LM ARCH$ (p-value $= 0.176$) ne signalent plus d'hétéroscédasticité résiduelle. En revanche, des dépendances subsistent dans la moyenne (Ljung-Box sur résidus en niveau) et la normalité reste rejetée. Un modèle $ARMA-GARCH$, voire asymétrique (type $EGARCH$), pourrait améliorer la spécification.
+
+```{r}
+volatilite_conditionnelle <- volatility(fit_garch)
+residus_standardises <- residuals(fit_garch, standardize = TRUE)
+
+df_garch_viz <- data.frame(
+  Date = dates_daily,
+  Rendement = log_returns_daily,
+  Volatilite = volatilite_conditionnelle,
+  Residus = residus_standardises
+)
+
+p_vol <- ggplot(df_garch_viz, aes(x = Date)) +
+  geom_line(aes(y = abs(Rendement)), color = "lightgrey", linewidth = 0.3) +
+  geom_line(aes(y = Volatilite), color = "darkred", linewidth = 0.5) +
+  theme_minimal() +
+  labs(
+    title = "Volatilité conditionnelle (GARCH) vs Rendements absolus",
+    y = "Amplitude",
+    x = ""
+  )
+
+p_qq <- ggplot(df_garch_viz, aes(sample = Residus)) +
+  stat_qq() +
+  stat_qq_line(color = "darkred") +
+  theme_minimal() +
+  labs(
+    title = "QQ-Plot des résidus standardisés",
+    x = "Théorique",
+    y = "Empirique"
+  )
+
+p_vol / p_qq
+```
+
+La validation du modèle GARCH s'apprécie également par l'inspection visuelle de sa dynamique conditionnelle. La superposition de la volatilité conditionnelle estimée sur les rendements absolus démontre la réactivité de la spécification : la courbe de volatilité s'ajuste parfaitement aux périodes de turbulence, englobant les grappes de volatilité caractéristiques de l'éclatement de la bulle internet et de la crise des subprimes. L'équation de variance a donc fidèlement capturé l'hétéroscédasticité empirique. L'examen du QQ-Plot des résidus standardisés corrobore cependant les limites identifiées par les tests statistiques de normalité. Bien que l'utilisation d'une loi de Student ait absorbé une large part de la leptokurticité, les quantiles extrêmes empiriques dévient toujours de la droite théorique. Ce phénomène illustre l'existence d'asymétries profondes dans la distribution des chocs boursiers, confirmant qu'une modélisation univariée, même sophistiquée, peine à capturer l'intégralité du bruit généré par l'efficience des marchés financiers.
+
+# Seconde Partie : Analyse des séries macroéconomiques (Eurostat)
+
+## Importation et préparation des données
+
+Nous importons les données macroéconomiques d'Eurostat, centrées sur le PIB et ses déterminants potentiels (taux de change EUR/USD, taux d'intérêt, production industrielle). Ces données sont trimestrielles et couvrent la période $1990-2023$.
+
+```{r}
+file_path_eco <- "./data/DANJOU_EcoSeriePIB.csv"
+df_eco <- read.csv(file_path_eco, stringsAsFactors = FALSE)
+
+df_eco$time <- as.Date(df_eco$time)
+```
+
+## Analyse descriptive et caractéristiques du PIB
+
+```{r}
+p_pib <- ggplot(df_eco, aes(x = time, y = PIB)) +
+  geom_line(color = "darkblue", linewidth = 0.8) +
+  theme_minimal() +
+  labs(title = "Produit Intérieur Brut (PIB)", y = "PIB", x = "")
+
+print(p_pib)
+
+acf(df_eco$PIB, main = "ACF - PIB")
+pacf(df_eco$PIB, main = "PACF - PIB")
+
+adf.test(df_eco$PIB)
+kpss.test(df_eco$PIB)
+```
+
+```{r}
+pib_log_ts <- ts(log(df_eco$PIB), frequency = 4, start = c(1990, 1))
+
+decomp_stl <- stl(pib_log_ts, s.window = "periodic")
+
+plot(decomp_stl, main = "Décomposition STL du logarithme du PIB")
+```
+
+Le passage des rendements boursiers aux agrégats de la comptabilité nationale marque un changement de paradigme statistique : nous passons d'une volatilité erratique à une dynamique régie par des évolutions structurelles, des saisonnalités marquées et des chocs exogènes.
+
+L'examen graphique de la chronique du PIB révèle une tendance haussière de long terme et une saisonnalité trimestrielle régulière, brutalement interrompues par la rupture de 2020. Les tests formels confirment la non-stationnarité en niveau (test **ADF** avec p-value $=0.6611$ et test **KPSS** avec p-value $<0.01$), classant sans ambiguïté le PIB comme un processus intégré d'ordre au moins $I(1)$.
+
+L'inspection visuelle met également en évidence un effet « d'éventail » : l'amplitude des oscillations saisonnières s'accroît proportionnellement au niveau de la série. Ce comportement, caractéristique d'un schéma de décomposition multiplicatif, impose une transformation logarithmique préalable. En stabilisant la variance (recherche d'homoscédasticité), cette linéarisation permet de basculer vers un schéma additif sur les log-données. Cette étape est le garant méthodologique de la robustesse des modélisations linéaires ultérieures, telles que les spécifications $SARIMA$ ou les systèmes $VAR$.
+
+L'extraction non paramétrique via l'algorithme **STL**, appliquée à cette série logarithmique, formalise remarquablement ces observations. La décomposition isole une composante tendancielle lisse et confirme la stricte régularité de la composante saisonnière, dont l'amplitude est désormais parfaitement constante, validant empiriquement le succès de la transformation logarithmique. Enfin, la composante résiduelle apparaît globalement stationnaire, à l'exception notable d'une impulsion négative extrême isolant le choc structurel de $2020$. Cette décomposition rigoureuse justifie formellement la nécessité d'appliquer des opérateurs de différenciation régulière et saisonnière pour stationnariser la dynamique avant toute modélisation.
+
+## Analyse univariée du PIB : Modélisation SARIMA et limites
+
+```{r}
+df_eco$LogCroissance <- c(NA, diff(log(df_eco$PIB)))
+croissance_pib <- na.omit(df_eco$LogCroissance)
+
+ts_pib <- ts(croissance_pib, start = c(1990, 2), frequency = 4)
+
+autoplot(ts_pib) +
+  theme_minimal() +
+  labs(
+    title = "Taux de croissance trimestriel du PIB",
+    y = "Croissance logarithmique",
+    x = ""
+  )
+
+modele_pib <- auto.arima(
+  ts_pib,
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE,
+  ic = "aic"
+)
+
+summary(modele_pib)
+
+checkresiduals(modele_pib)
+```
+
+```{r}
+ts_eurusd <- ts(
+  na.omit(diff(log(df_eco$EUR_USD))),
+  start = c(1990, 2),
+  frequency = 4
+)
+ts_interet <- ts(
+  na.omit(diff(df_eco$Interet)),
+  start = c(1990, 2),
+  frequency = 4
+)
+ts_indus_uni <- ts(
+  na.omit(diff(log(df_eco$IndusProd))),
+  start = c(1990, 2),
+  frequency = 4
+)
+
+mod_eurusd <- auto.arima(
+  ts_eurusd,
+  ic = "aic",
+  stepwise = FALSE,
+  approximation = FALSE
+)
+mod_interet <- auto.arima(
+  ts_interet,
+  ic = "aic",
+  stepwise = FALSE,
+  approximation = FALSE
+)
+mod_indus <- auto.arima(
+  ts_indus_uni,
+  ic = "aic",
+  stepwise = FALSE,
+  approximation = FALSE
+)
+
+df_synth_uni <- data.frame(
+  Variable = c(
+    "PIB (Croissance log)",
+    "EUR/USD (Rendement log)",
+    "Taux Interet (Diff)",
+    "Prod. Indus. (Croissance log)"
+  ),
+  Modele_Optimal = c(
+    "SARIMA(1,0,1)(1,1,1)[4]",
+    paste0("ARIMA(", paste(arimaorder(mod_eurusd), collapse = ","), ")"),
+    paste0("ARIMA(", paste(arimaorder(mod_interet), collapse = ","), ")"),
+    paste0("ARIMA(", paste(arimaorder(mod_indus), collapse = ","), ")")
+  ),
+  AIC = c(AIC(modele_pib), AIC(mod_eurusd), AIC(mod_interet), AIC(mod_indus))
+)
+```
+
+```{r, results='markup'}
+knitr::kable(
+  df_synth_uni,
+  digits = 2,
+  caption = "Synthèse des modèles univariés optimaux par variable"
+)
+```
+
+Le PIB est modélisé en croissance logarithmique trimestrielle. L'optimisation algorithmique retient un modèle $SARIMA(1,0,1)(1,1,1)_4$​, les résidus sont assimilables à un bruit blanc (test de Ljung-Box, p-value $=0.9179$) et le critère d'information s'établit à un **AIC** de $−633.92$.
+
+Conformément à l'exigence méthodologique, cette démarche d'identification univariée a été étendue systématiquement aux autres variables macroéconomiques du système. Le tableau de synthèse révèle que la production industrielle et le taux de change suivent également des processus intégrant une double dynamique régulière et saisonnière sur leurs données transformées (s'identifiant mathématiquement à des processus $SARIMA(1,0,1)(0,1,2)_4$​ et $SARIMA(2,0,2)(1,0,0)_4$​).
+
+Il est particulièrement intéressant de noter que le taux d'intérêt, stationnarisé par une différence simple, se réduit à un processus de moyenne mobile pur $ARIMA(0,0,1)$ (ou $MA(1)$). Cette étape univariée exhaustive confirme l'hétérogénéité des structures temporelles en présence. Elle valide surtout la nécessité absolue de purger chaque série de sa propre dynamique interne (notamment l'inertie saisonnière) avant de pouvoir modéliser rigoureusement leurs interactions croisées dans un cadre multivarié.
+
+## Analyse des corrélations et causalité
+
+```{r}
+df_subset <- df_eco |>
+  dplyr::select(time, PIB, EUR_USD, Interet, IndusProd) |>
+  na.omit()
+
+df_stat <- data.frame(
+  time = df_subset$time[-1],
+  d_PIB = diff(log(df_subset$PIB)),
+  d_EUR_USD = diff(log(df_subset$EUR_USD)),
+  d_Interet = diff(df_subset$Interet),
+  d_Indus = diff(log(df_subset$IndusProd))
+)
+
+mat_cor <- cor(df_stat[, -1])
+
+corrplot(mat_cor, method = "number", type = "upper", tl.col = "black")
+
+grangertest(d_PIB ~ d_Interet, order = 4, data = df_stat)
+grangertest(d_PIB ~ d_Indus, order = 4, data = df_stat)
+grangertest(d_PIB ~ d_EUR_USD, order = 4, data = df_stat)
+```
+
+Préalablement au calcul des corrélations, les séries ont été stationnarisées. Il convient de préciser que si le PIB, le taux de change et la production industrielle ont subi une transformation log-différentielle pour stabiliser leur variance, le taux d'intérêt a été traité par une différence simple, le passage au logarithme étant proscrit pour des variables pouvant s'approcher de zéro ou devenir négatives. Sur ces bases stationnaires, les corrélations indiquent un lien fort PIB-industrie ($0.76$), contre des liens faibles avec le change ($0.07$) et le taux d'intérêt ($0.01$). Ces observations statiques sont confirmées par l'analyse dynamique via les tests de causalité au sens de Granger. Les résultats indiquent que la production industrielle cause le PIB au sens de Granger, justifiant son statut de variable explicative avancée. À l'inverse, le taux d'intérêt et le taux de change ne révèlent pas de causalité significative. Ce diagnostic fondamental justifie la sélection exclusive de la production industrielle pour réduire la dimensionnalité lors des modélisations multivariées ultérieures ($ARIMAX$ et système $VAR$).
+
+## Régression dynamique du PIB
+
+```{r}
+ts_indus <- ts(df_stat$d_Indus, start = c(1990, 2), frequency = 4)
+
+modele_arimax <- auto.arima(
+  ts_pib,
+  xreg = ts_indus,
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE,
+  ic = "aic"
+)
+
+summary(modele_arimax)
+
+checkresiduals(modele_arimax)
+```
+
+L'$ARIMAX$ avec production industrielle confirme ce résultat : modèle $ARIMA(3,0,1)(0,1,1)_4$, coefficient exogène positif et significatif ($0.4515$, écart-type $0.0267$). L'ajustement s'améliore fortement (**AIC** $=−767.39$ vs $−633.92$), avec des résidus acceptables (Ljung-Box p-value $=0.1297$). D'un point de vue macroéconomique, la valeur de ce coefficient ($0.4515$) indique qu'une accélération de $1\%$ de la croissance industrielle se traduit instantanément par un surplus de croissance du PIB de l'ordre de $0.45\%$, quantifiant ainsi le poids fondamental de l'industrie dans la formation de la valeur ajoutée nationale.
+
+## Modélisation multivariée (VAR / VARMA)
+
+Afin de prévenir le sur-apprentissage inhérent au critère **AIC** sur de petits échantillons, la sélection de l'ordre du $VAR$ a été réalisée via le critère **BIC** (Schwarz) sur le sous-échantillon d'entraînement. L'algorithme retient un modèle $VAR(4)$ parcimonieux, capturant la dynamique conjointe du PIB et de la production industrielle sur une année complète.
+
+```{r}
+df_var <- df_stat[, c("d_PIB", "d_Indus")]
+
+h <- 8
+n <- nrow(df_var)
+train_var <- df_var[1:(n - h), ]
+test_var <- df_var[(n - h + 1):n, ]
+
+selection <- VARselect(train_var, lag.max = 8, type = "const")
+p_bic <- selection$selection["SC(n)"]
+
+modele_var_train <- VAR(train_var, p = p_bic, type = "const")
+```
+
+```{r}
+serial_test <- serial.test(
+  modele_var_train,
+  lags.pt = 12,
+  type = "PT.asymptotic"
+)
+print(serial_test)
+
+arch_test_var <- arch.test(modele_var_train, lags.multi = 5)
+print(arch_test_var)
+
+norm_test <- normality.test(modele_var_train)
+print(norm_test)
+
+print(roots(modele_var_train))
+```
+
+L'analyse rigoureuse des diagnostics sur les résidus révèle les limites inhérentes à la modélisation linéaire face à des séries macroéconomiques heurtées. Si les racines du polynôme caractéristique sont toutes strictement inférieures à $1$ (validant la stabilité mathématique globale du système), les tests statistiques sur les innovations rejettent l'hypothèse de bruit blanc pur. Le test de Portmanteau indique une autocorrélation résiduelle, et le test $ARCH$ multivarié détecte la présence d'hétéroscédasticité conditionnelle. Enfin, l'hypothèse de normalité est rejetée, spécifiquement en raison d'un excès de kurtosis (queues de distribution épaisses).
+
+Ces résultats illustrent de manière empirique l'impact du choc structurel de $2020$ : cette rupture extrême génère des valeurs aberrantes et une volatilité soudaine qu'un modèle $VAR$ linéaire ne peut mathématiquement pas absorber intégralement. La stabilité du système étant néanmoins assurée par l'analyse des racines, l'étude se poursuit par l'évaluation de la capacité de ce modèle à anticiper la trajectoire du PIB hors-échantillon, comparativement aux approches univariées.
+
+## Projections et comparaison des performances
+
+```{r}
+prev_var_out <- predict(modele_var_train, n.ahead = h)
+prev_pib <- prev_var_out$fcst$d_PIB[, "fcst"]
+
+rmse_var_out <- sqrt(mean((test_var$d_PIB - prev_pib)^2))
+mae_var_out <- mean(abs(test_var$d_PIB - prev_pib))
+
+modele_sarima_train <- auto.arima(train_var$d_PIB, seasonal = TRUE, ic = "bic")
+prev_sarima_out <- forecast(modele_sarima_train, h = h)$mean
+
+rmse_sarima_out <- sqrt(mean((test_var$d_PIB - prev_sarima_out)^2))
+mae_sarima_out <- mean(abs(test_var$d_PIB - prev_sarima_out))
+
+df_comparaison_out <- data.frame(
+  Modele = c(
+    paste0(
+      "SARIMA(",
+      paste(arimaorder(modele_sarima_train), collapse = ","),
+      ")"
+    ),
+    paste0("VAR(", p_bic, ")")
+  ),
+  RMSE = c(rmse_sarima_out, rmse_var_out),
+  MAE = c(mae_sarima_out, mae_var_out)
+)
+
+dm_test <- dm.test(
+  test_var$d_PIB - prev_sarima_out,
+  test_var$d_PIB - prev_pib,
+  h = 1,
+  power = 2
+)
+```
+
+```{r, results = 'markup'}
+knitr::kable(df_comparaison_out, digits = 5)
+print(dm_test)
+```
+
+L'évaluation des performances prédictives est menée de manière stricte sur l'échantillon de test (évaluation out-of-sample sur les 8 derniers trimestres, soit un horizon macroéconomique standard de deux ans). Le tableau comparatif révèle que le système multivarié $VAR(4)$ surperforme empiriquement le modèle univarié $SARIMA(1,0,0)$ sur les deux métriques d'erreur (**RMSE** de $0.06121$ contre $0.06301$, et **MAE** de $0.04186$ contre $0.04894$).
+
+Toutefois, l'application du test de Diebold-Mariano sur les erreurs de prévision permet de nuancer ce constat avec la rigueur statistique requise. La p-value s'élevant à $0.7419$, l'hypothèse nulle d'égalité des précisions prédictives ne peut être rejetée au seuil de 5%. La supériorité empirique du système multivarié n'est donc pas statistiquement significative.
+
+Loin de constituer une limite au modèle, ce résultat est économétriquement très instructif : il illustre la difficulté structurelle à surpasser les modèles univariés très parcimonieux en prévision macroéconomique hors-échantillon. L'intégration de la dynamique industrielle offre une modélisation structurelle riche et capte les interactions in-sample de manière robuste, mais son pouvoir prédictif marginal se heurte au bruit inhérent aux chocs conjoncturels et aux limites des petits échantillons de validation.
+
+# Conclusion
+
+L’aboutissement de ce projet confirme une idée centrale de l’ingénierie statistique : la performance d’un modèle dépend d’abord de l’adéquation entre ses hypothèses et le processus générateur des données, bien plus que de sa seule complexité mathématique.
+
+Sur la partie financière, l’étude d’ArcelorMittal démontre la forte efficience informationnelle sur la moyenne des rendements, tandis que la volatilité présente une dynamique persistante. Les modèles de type GARCH capturent efficacement cette hétéroscédasticité conditionnelle et constituent le cadre théorique adéquat pour modéliser l'exposition au risque.
+
+Sur la partie macroéconomique, l’analyse du PIB confirme la puissance des approches multivariées pour interpréter les relations structurelles *in-sample*, notamment à travers la causalité de la production industrielle sur la croissance. Toutefois, l'évaluation stricte hors-échantillon a mis en exergue la difficulté structurelle à surpasser significativement les modèles univariés les plus parcimonieux. Si le système $VAR$ surperforme empiriquement le modèle $SARIMA$ sur les critères d'erreur classiques, le test de Diebold-Mariano nuance ce constat en révélant que cet avantage prédictif n'est pas statistiquement significatif au seuil de 5%. L'intégration de la dynamique industrielle offre une modélisation explicative riche, mais son pouvoir prédictif marginal se heurte au bruit conjoncturel.
+
+Enfin, l'analyse a mis en lumière les limites inhérentes à la modélisation $VAR$ linéaire face à des ruptures brutales. Le choc exogène extrême de $2020$ a logiquement dégradé les propriétés statistiques des résidus du système multivarié (générant hétéroscédasticité et excès de kurtosis). L'introduction de variables indicatrices d'impulsion (*dummy variables*) constituerait la perspective d'amélioration la plus directe pour absorber de tels chocs exogènes et restaurer la stricte validité des hypothèses mathématiques sous-jacentes.
+
+Au total, ce travail souligne qu’une modélisation robuste repose sur l'équilibre entre la maîtrise théorique, l'analyse critique des limites du modèle choisi, et une grande prudence lors de la validation empirique des performances prédictives.
